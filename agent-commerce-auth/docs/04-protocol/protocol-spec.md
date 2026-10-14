@@ -123,14 +123,14 @@ Mandate는 **에이전트만 보유**하며 머천트에 직접 제시하지 않
 ```json
 {
   "currency": "KRW",
-  "max_amount_per_tx": 50000,
+  "max_amount_per_tx": 100000,             // 하드 상한 (Step-up으로도 초과 불가)
   "max_amount_per_period": { "period": "P1M", "amount": 200000 },
   "max_tx_count": 20,
   "merchants": { "allow": ["mch_01…", "*.coupang.example"], "deny": [] },
   "categories": { "allow": ["grocery", "household"] },
   "shipping": { "address_ref": "addr_01…", "allow_change": false },
   "human_presence": "not_required",      // "not_required" | "required_over_amount" | "always"
-  "stepup_over_amount": 50000,
+  "stepup_over_amount": 50000,             // 초과 ~ max_amount_per_tx 구간은 Step-up 후 허용
   "valid_hours": { "tz": "Asia/Seoul", "from": "07:00", "to": "23:00" }
 }
 ```

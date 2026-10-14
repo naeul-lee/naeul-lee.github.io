@@ -29,7 +29,7 @@ sequenceDiagram
   participant AS as Authorization Server
   participant MS as Mandate Service
   AG->>AS: PAR / authorize (client_id=operator, agent_id, RAR authorization_details{type:agentpass_mandate, limits…}, PKCE)
-  AS->>U: 동의 화면 — 사람이 읽는 요약<br/>"ShopBot이 생필품을 1회 5만원·월 20만원까지 구매"
+  AS->>U: 동의 화면 — 사람이 읽는 요약<br/>"ShopBot이 생필품을 월 20만원까지 구매, 5만원 초과 시 본인 승인"
   U->>AS: 패스키(WebAuthn) 승인 — challenge = hash(summary ‖ details)
   AS->>MS: Mandate 생성 (user, agent, constraints, consent_hash, webauthn assertion)
   MS->>MS: AgentPass 키로 서명 → Mandate JWT, status_list idx 할당
@@ -76,7 +76,7 @@ sequenceDiagram
   participant TS as Token Service
   participant AS as Auth Server (CIBA)
   participant U as User (Wallet App)
-  AG->>TS: token-exchange (amount=72,000원 > 1회 한도 50,000원)
+  AG->>TS: token-exchange (amount=72,000원 > stepup_over_amount 50,000원, ≤ max_amount_per_tx 100,000원)
   TS-->>AG: 403 {error:"step_up_required", auth_req_id, interval:5}
   TS->>AS: CIBA 요청 생성 (binding_message="ShopBot: 72,000원 공기청정기 필터 구매 승인?")
   AS->>U: 푸시 알림
