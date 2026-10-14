@@ -1,0 +1,445 @@
+openapi: 3.1.0
+info:
+  title: AgentPass API
+  version: 0.1.0
+  description: |
+    AI 에이전트 커머스를 위한 신원·위임·거래 검증 API.
+    토큰/서명 형식은 docs/04-protocol/protocol-spec.md 참조.
+servers:
+  - url: https://api.agentpass.example/v1
+  - url: https://sandbox.agentpass.example/v1
+tags:
+  - name: registry
+    description: 운영사·에이전트 인스턴스 등록 (Operator 인증)
+  - name: oauth
+    description: OAuth 2.1 인가 서버 (PAR, authorize, token, CIBA)
+  - name: mandates
+    description: 사용자 Mandate 관리 (Wallet 인증)
+  - name: transactions
+    description: 머천트 거래 정산·증빙 (Merchant 인증)
+  - name: discovery
+    description: 공개 디렉토리 (인증 없음, 캐시 가능)
+
+components:
+  securitySchemes:
+    operatorAuth:
+      type: http
+      scheme: bearer
+      description: 운영사 private_key_jwt 로 얻은 client credentials 토큰 (DPoP 바인딩)
+    merchantAuth:
+      type: http
+      scheme: bearer
+      description: 머천트 client credentials 토큰 (DPoP 바인딩)
+    walletAuth:
+      type: http
+      scheme: bearer
+      description: 사용자 지갑 세션 토큰 (패스키 로그인)
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          examples: [mandate_revoked]
+        error_description: { type: string }
+        violations:
+          type: array
+          items: { type: string }
+    Money:
+      type: object
+      required: [value, currency]
+      properties:
+        value: { type: integer, description: 최소 통화 단위 }
+        currency: { type: string, pattern: '^[A-Z]{3}$' }
+    Constraints:
+      type: object
+      required: [currency]
+      properties:
+        currency: { type: string }
+        max_amount_per_tx: { type: integer }
+        max_amount_per_period:
+          type: object
+          properties:
+            period: { type: string, examples: [P1M] }
+            amount: { type: integer }
+        max_tx_count: { type: integer }
+        merchants:
+          type: object
+          properties:
+            allow: { type: array, items: { type: string } }
+            deny: { type: array, items: { type: string } }
+        categories:
+          type: object
+          properties:
+            allow: { type: array, items: { type: string } }
+        human_presence:
+          type: string
+          enum: [not_required, required_over_amount, always]
+        stepup_over_amount: { type: integer }
+    Operator:
+      type: object
+      properties:
+        id: { type: string, examples: [op_01JBQ] }
+        legal_name: { type: string }
+        domain: { type: string }
+        trust_tier: { type: string, enum: [registered, verified, certified, suspended] }
+        jwks_uri: { type: string, format: uri }
+    AgentInstance:
+      type: object
+      properties:
+        agent_id: { type: string }
+        operator_id: { type: string }
+        operator_tier: { type: string }
+        jwk: { type: object }
+        jkt: { type: string }
+        status: { type: string, enum: [active, revoked] }
+        exp: { type: integer }
+    Mandate:
+      type: object
+      properties:
+        id: { type: string }
+        operator_id: { type: string }
+        actions: { type: array, items: { type: string } }
+        constraints: { $ref: '#/components/schemas/Constraints' }
+        consent_summary: { type: string }
+        status: { type: string, enum: [active, revoked, expired, exhausted] }
+        usage:
+          type: object
+          properties:
+            period_spent: { type: integer }
+            tx_count: { type: integer }
+        expires_at: { type: string, format: date-time }
+    TokenExchangeResponse:
+      type: object
+      properties:
+        access_token: { type: string, description: Transaction Token (JWT) }
+        issued_token_type: { type: string, const: 'urn:agentpass:token-type:transaction' }
+        token_type: { type: string, const: DPoP }
+        expires_in: { type: integer, examples: [300] }
+        payment_credential:
+          type: object
+          properties:
+            provider: { type: string, examples: [stripe_spt, visa_agent_token, mc_agentic_token, kr_pg_billing] }
+            token: { type: string }
+            max_amount: { $ref: '#/components/schemas/Money' }
+            expires_at: { type: string, format: date-time }
+    StepUpRequired:
+      type: object
+      properties:
+        error: { type: string, const: step_up_required }
+        auth_req_id: { type: string }
+        interval: { type: integer }
+        expires_in: { type: integer }
+    Capture:
+      type: object
+      required: [status, final_amount]
+      properties:
+        status: { type: string, enum: [captured, failed, voided] }
+        final_amount: { $ref: '#/components/schemas/Money' }
+        order_id: { type: string }
+
+paths:
+  /.well-known/agentpass/jwks:
+    get:
+      tags: [discovery]
+      summary: AgentPass 발급 키 (Mandate / Tx Token / 체크포인트 검증용)
+      responses:
+        '200': { description: JWKS }
+  /.well-known/agentpass/agents/{agent_id}:
+    get:
+      tags: [discovery]
+      summary: 에이전트 인스턴스 공개 정보 (Signature-Agent 대상)
+      parameters:
+        - { name: agent_id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AgentInstance' }
+        '404': { description: 미등록 }
+  /status/{region}/{list_id}:
+    get:
+      tags: [discovery]
+      summary: Token Status List (Mandate 철회 상태)
+      parameters:
+        - { name: region, in: path, required: true, schema: { type: string } }
+        - { name: list_id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: statuslist+jwt
+          content:
+            application/statuslist+jwt: {}
+
+  /operators:
+    post:
+      tags: [registry]
+      summary: 운영사 등록 (도메인 소유 증명 챌린지 반환)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [legal_name, domain, jwks_uri]
+              properties:
+                legal_name: { type: string }
+                domain: { type: string }
+                jwks_uri: { type: string, format: uri }
+                contacts: { type: array, items: { type: string, format: email } }
+      responses:
+        '201':
+          description: 생성됨
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Operator'
+                  - type: object
+                    properties:
+                      domain_challenge: { type: string, description: DNS TXT 값 }
+  /operators/{operator_id}/verify-domain:
+    post:
+      tags: [registry]
+      summary: 도메인 소유 증명 확인
+      security: [{ operatorAuth: [] }]
+      parameters:
+        - { name: operator_id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: registered 로 전환 }
+        '409': { description: 챌린지 불일치 }
+  /agents/instances:
+    post:
+      tags: [registry]
+      summary: 에이전트 인스턴스 등록 (운영사가 서명한 Instance Assertion 제출)
+      security: [{ operatorAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [instance_assertion]
+              properties:
+                instance_assertion: { type: string }
+      responses:
+        '201':
+          description: 등록됨
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AgentInstance' }
+        '400': { description: 서명/수명 오류, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+  /agents/instances/{agent_id}:
+    delete:
+      tags: [registry]
+      summary: 인스턴스 즉시 폐기 (키 유출 대응)
+      security: [{ operatorAuth: [] }]
+      parameters:
+        - { name: agent_id, in: path, required: true, schema: { type: string } }
+      responses:
+        '204': { description: 폐기됨 }
+
+  /oauth2/par:
+    post:
+      tags: [oauth]
+      summary: Pushed Authorization Request (RAR authorization_details 포함)
+      security: [{ operatorAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [client_id, agent_id, authorization_details, code_challenge, redirect_uri]
+              properties:
+                client_id: { type: string }
+                agent_id: { type: string }
+                authorization_details: { type: string, description: JSON 배열 문자열 }
+                code_challenge: { type: string }
+                code_challenge_method: { type: string, const: S256 }
+                redirect_uri: { type: string }
+      responses:
+        '201':
+          description: request_uri 반환
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  request_uri: { type: string }
+                  expires_in: { type: integer }
+  /oauth2/token:
+    post:
+      tags: [oauth]
+      summary: 토큰 엔드포인트 (authorization_code → Mandate, token-exchange → Tx Token / 자식 Mandate, CIBA)
+      parameters:
+        - { name: DPoP, in: header, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [grant_type]
+              properties:
+                grant_type:
+                  type: string
+                  enum:
+                    - authorization_code
+                    - urn:ietf:params:oauth:grant-type:token-exchange
+                    - urn:openid:params:grant-type:ciba
+                subject_token: { type: string }
+                subject_token_type: { type: string }
+                actor_token: { type: string }
+                actor_token_type: { type: string }
+                requested_token_type: { type: string }
+                authorization_details: { type: string }
+                auth_req_id: { type: string }
+                code: { type: string }
+                code_verifier: { type: string }
+      responses:
+        '200':
+          description: 발급
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenExchangeResponse' }
+        '401': { description: 무효 토큰/바인딩 불일치, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        '403':
+          description: Step-up 필요 또는 제약 위반
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/StepUpRequired'
+                  - $ref: '#/components/schemas/Error'
+  /oauth2/introspect:
+    post:
+      tags: [oauth]
+      summary: Tx Token 실시간 상태 확인 (고액 거래 선택적)
+      security: [{ merchantAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: { type: string }
+      responses:
+        '200': { description: RFC 7662 응답 + mandate_status }
+
+  /mandates:
+    get:
+      tags: [mandates]
+      summary: 내 Mandate 목록 (사용 내역·잔여 한도 포함)
+      security: [{ walletAuth: [] }]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Mandate' }
+  /mandates/{mandate_id}:
+    get:
+      tags: [mandates]
+      summary: Mandate 상세
+      security: [{ walletAuth: [] }]
+      parameters:
+        - { name: mandate_id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Mandate' }
+    delete:
+      tags: [mandates]
+      summary: Mandate 철회 (자식 Mandate 연쇄 철회, 패스키 재인증 필요)
+      security: [{ walletAuth: [] }]
+      parameters:
+        - { name: mandate_id, in: path, required: true, schema: { type: string } }
+      responses:
+        '204': { description: 철회됨 }
+  /mandates/{mandate_id}/pause:
+    post:
+      tags: [mandates]
+      summary: 일시 정지 (Step-up 피로 공격 등 대응)
+      security: [{ walletAuth: [] }]
+      parameters:
+        - { name: mandate_id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: 정지됨 }
+
+  /transactions/{jti}/capture:
+    post:
+      tags: [transactions]
+      summary: 거래 결과 보고 → 누적 한도 확정, 영수증 기록
+      security: [{ merchantAuth: [] }]
+      parameters:
+        - { name: jti, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Capture' }
+      responses:
+        '200': { description: 확정 }
+        '409': { description: 이미 처리됨 / 금액 초과 }
+  /transactions/{jti}/evidence:
+    get:
+      tags: [transactions]
+      summary: 분쟁용 Evidence Bundle
+      security: [{ merchantAuth: [] }]
+      parameters:
+        - { name: jti, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: 독립 검증 가능한 증빙 번들
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  mandate_disclosure: { type: string, description: SD-JWT (머천트 관련 constraints 만 공개) }
+                  consent_assertion_hash: { type: string }
+                  transaction_token: { type: string }
+                  cart: { type: object }
+                  http_signature: { type: object }
+                  ledger_proof:
+                    type: object
+                    properties:
+                      entries: { type: array, items: { type: object } }
+                      checkpoint: { type: string }
+
+webhooks:
+  mandate.revoked:
+    post:
+      summary: Mandate 철회 알림 (AgentPass-Signature HMAC 헤더)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                mandate_id: { type: string }
+                revoked_at: { type: string, format: date-time }
+                outstanding_jti: { type: array, items: { type: string } }
+      responses:
+        '200': { description: 수신 }
+  agent.revoked:
+    post:
+      summary: 에이전트 인스턴스/운영사 폐기 알림
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                agent_id: { type: string }
+                operator_id: { type: string }
+      responses:
+        '200': { description: 수신 }
